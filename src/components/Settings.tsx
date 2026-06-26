@@ -45,6 +45,7 @@ export const Settings: React.FC = () => {
   const [authSuccess, setAuthSuccess] = useState('');
   const [authLoading, setAuthLoading] = useState(false);
   const [cloudMessage, setCloudMessage] = useState('');
+  const [showSqlScript, setShowSqlScript] = useState(false);
 
   const handleCloudLogin = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -608,25 +609,87 @@ ${formatDate(1)},00:05,08:30,4`;
         {/* Right Column: Folder Sync & Watch/Fit Imports */}
         <div className="space-y-6">
 
-          {/* Cloud Sync Panel (Firebase) */}
+          {/* Cloud Sync Panel (Supabase) */}
           <div className="p-5 rounded-2xl border border-white/5 bg-slate-900/30 space-y-4">
             <h3 className="text-xs font-semibold text-slate-400 flex items-center gap-1.5 uppercase tracking-wider">
-              <Upload className="w-4 h-4 text-violet-400" /> Sincronização em Nuvem (Firebase)
+              <Upload className="w-4 h-4 text-violet-400" /> Sincronização em Nuvem (Supabase)
             </h3>
 
             {!isCloudConfigured ? (
               <div className="space-y-3">
                 <p className="text-[11px] text-slate-500 leading-normal">
-                  O recurso de backup automático na nuvem está **desativado** porque nenhuma credencial do Firebase foi configurada.
+                  O recurso de backup automático na nuvem está <strong>desativado</strong> porque nenhuma credencial do Supabase foi configurada.
                 </p>
                 <div className="text-[10px] p-3 rounded-xl border border-amber-500/10 bg-amber-500/[0.02] text-amber-400/90 space-y-2">
                   <span className="font-bold flex items-center gap-1"><AlertCircle className="w-3.5 h-3.5" /> Como ativar:</span>
-                  <ol className="list-decimal list-inside space-y-1">
-                    <li>Crie um projeto gratuito no site do Firebase.</li>
-                    <li>Ative o **Authentication** (Email/Senha) e o **Firestore Database**.</li>
-                    <li>Crie um arquivo <code className="text-slate-300">.env.local</code> na raiz do projeto baseado no <code className="text-slate-300">.env.example</code>.</li>
-                    <li>Adicione as variáveis de ambiente equivalentes na Vercel para a versão online.</li>
+                  <ol className="list-decimal list-inside space-y-1 text-slate-300">
+                    <li>Crie um projeto gratuito em <a href="https://supabase.com" target="_blank" rel="noopener noreferrer" className="text-violet-400 underline hover:text-violet-300">supabase.com</a>.</li>
+                    <li>Obtenha as credenciais em <strong>Project Settings &gt; API</strong>.</li>
+                    <li>Crie um arquivo <code className="text-slate-100 bg-slate-950 px-1 py-0.5 rounded text-[9px]">.env.local</code> na raiz do projeto com as chaves <code className="text-slate-100">VITE_SUPABASE_URL</code> e <code className="text-slate-100">VITE_SUPABASE_ANON_KEY</code>.</li>
+                    <li>Configure as mesmas chaves de ambiente na Vercel.</li>
+                    <li>Execute o script SQL abaixo no <strong>SQL Editor</strong> do Supabase para criar as tabelas e ativar a segurança (RLS).</li>
                   </ol>
+
+                  <button
+                    type="button"
+                    onClick={() => setShowSqlScript(!showSqlScript)}
+                    className="mt-2 text-[10px] text-violet-400 hover:text-violet-300 font-semibold underline block"
+                  >
+                    {showSqlScript ? 'Ocultar Script SQL' : 'Mostrar Script SQL para o Supabase'}
+                  </button>
+
+                  {showSqlScript && (
+                    <div className="mt-2 space-y-1">
+                      <textarea
+                        readOnly
+                        rows={10}
+                        value={`-- 1. Criar tabela de logs de sono
+create table if not exists public.sleep_logs (
+  user_id uuid references auth.users not null,
+  date text not null,
+  bedtime text not null,
+  wake_time text not null,
+  sleep_quality integer not null,
+  night_awakenings jsonb not null default '[]'::jsonb,
+  notes text,
+  tags jsonb not null default '[]'::jsonb,
+  source text not null,
+  updated_at bigint not null,
+  primary key (user_id, date)
+);
+
+-- 2. Criar tabela de configurações de sono
+create table if not exists public.sleep_settings (
+  user_id uuid references auth.users not null primary key,
+  target_bedtime_start text not null,
+  target_bedtime_end text not null,
+  target_wake_time_start text not null,
+  target_wake_time_end text not null,
+  sleep_duration_goal numeric not null
+);
+
+-- 3. Habilitar RLS (Row-Level Security)
+alter table public.sleep_logs enable row level security;
+alter table public.sleep_settings enable row level security;
+
+-- 4. Criar Políticas RLS para sleep_logs
+create policy "Users can perform all actions on their own logs"
+  on public.sleep_logs
+  for all
+  using (auth.uid() = user_id)
+  with check (auth.uid() = user_id);
+
+-- 5. Criar Políticas RLS para sleep_settings
+create policy "Users can perform all actions on their own settings"
+  on public.sleep_settings
+  for all
+  using (auth.uid() = user_id)
+  with check (auth.uid() = user_id);`}
+                        className="w-full p-2 text-[9px] font-mono bg-slate-950 text-slate-300 rounded border border-white/5 focus:outline-none select-all cursor-text"
+                      />
+                      <span className="text-[9px] text-slate-500">Clique na caixa acima para selecionar tudo e copie para o editor do Supabase.</span>
+                    </div>
+                  )}
                 </div>
               </div>
             ) : (

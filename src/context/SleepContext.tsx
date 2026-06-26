@@ -1,20 +1,6 @@
 import React, { createContext, useContext, useState, useEffect, useRef } from 'react';
-import { 
-  signInWithEmailAndPassword, 
-  createUserWithEmailAndPassword, 
-  signOut, 
-  onAuthStateChanged,
-  type User
-} from 'firebase/auth';
-import { 
-  doc, 
-  setDoc, 
-  getDoc, 
-  deleteDoc, 
-  getDocs, 
-  collection
-} from 'firebase/firestore';
-import { auth, db, isFirebaseConfigured } from '../firebase';
+import { supabase, isSupabaseConfigured } from '../supabase';
+import type { User } from '@supabase/supabase-js';
 
 export interface Awakening {
   id: string;
@@ -94,6 +80,49 @@ const DEFAULT_SETTINGS: SleepSettings = {
 };
 
 const SleepContext = createContext<SleepContextType | undefined>(undefined);
+
+// Helper mapping functions between frontend structures and Supabase snake_case tables
+const mapRowToLog = (row: any): SleepLog => ({
+  date: row.date,
+  bedtime: row.bedtime,
+  wakeTime: row.wake_time,
+  sleepQuality: row.sleep_quality,
+  nightAwakenings: Array.isArray(row.night_awakenings) ? row.night_awakenings : [],
+  notes: row.notes || '',
+  tags: Array.isArray(row.tags) ? row.tags : [],
+  source: row.source,
+  updatedAt: Number(row.updated_at),
+});
+
+const mapLogToRow = (log: SleepLog, userId: string) => ({
+  user_id: userId,
+  date: log.date,
+  bedtime: log.bedtime,
+  wake_time: log.wakeTime,
+  sleep_quality: log.sleepQuality,
+  night_awakenings: log.nightAwakenings,
+  notes: log.notes,
+  tags: log.tags,
+  source: log.source,
+  updated_at: log.updatedAt || Date.now(),
+});
+
+const mapRowToSettings = (row: any): SleepSettings => ({
+  targetBedtimeStart: row.target_bedtime_start,
+  targetBedtimeEnd: row.target_bedtime_end,
+  targetWakeTimeStart: row.target_wake_time_start,
+  targetWakeTimeEnd: row.target_wake_time_end,
+  sleepDurationGoal: Number(row.sleep_duration_goal),
+});
+
+const mapSettingsToRow = (settings: SleepSettings, userId: string) => ({
+  user_id: userId,
+  target_bedtime_start: settings.targetBedtimeStart,
+  target_bedtime_end: settings.targetBedtimeEnd,
+  target_wake_time_start: settings.targetWakeTimeStart,
+  target_wake_time_end: settings.targetWakeTimeEnd,
+  sleep_duration_goal: settings.sleepDurationGoal,
+});
 
 // Helper functions for time calculations
 export function timeToMinutes(timeStr: string): number {
@@ -180,19 +209,28 @@ export const SleepProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   // Cloud Sync Functions
   const syncLogsWithCloud = async (currentUser?: User | null): Promise<string> => {
     const activeUser = currentUser === undefined ? cloudUser : currentUser;
-    if (!activeUser || !db) {
-      throw new Error('Usuário não autenticado no Firebase.');
+    if (!activeUser || !supabase) {
+      throw new Error('Usuário não autenticado no Supabase.');
     }
 
     setCloudSyncing(true);
     try {
-      // 1. Fetch all logs from Firestore for this user
-      const querySnapshot = await getDocs(collection(db, 'users', activeUser.uid, 'logs'));
+      // 1. Fetch all logs from Supabase for this user
+      const { data: cloudLogs, error } = await supabase
+        .from('sleep_logs')
+        .select('*')
+        .eq('user_id', activeUser.id);
+
+      if (error) {
+        throw error;
+      }
+
       const cloudLogsMap = new Map<string, SleepLog>();
-      
-      querySnapshot.forEach((doc) => {
-        cloudLogsMap.set(doc.id, doc.data() as SleepLog);
-      });
+      if (cloudLogs) {
+        cloudLogs.forEach((row) => {
+          cloudLogsMap.set(row.date, mapRowToLog(row));
+        });
+      }
 
       // 2. Merge local and cloud logs
       const localLogsMap = new Map<string, SleepLog>();
@@ -231,10 +269,15 @@ export const SleepProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         }
       }
 
-      // 3. Upload missing/updated logs to Firestore
+      // 3. Upload missing/updated logs to Supabase
       if (logsToUpload.length > 0) {
-        for (const log of logsToUpload) {
-          await setDoc(doc(db, 'users', activeUser.uid, 'logs', log.date), log);
+        const rowsToUpload = logsToUpload.map(log => mapLogToRow(log, activeUser.id));
+        const { error: upsertError } = await supabase
+          .from('sleep_logs')
+          .upsert(rowsToUpload);
+
+        if (upsertError) {
+          throw upsertError;
         }
       }
 
@@ -252,48 +295,85 @@ export const SleepProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   };
 
   const loginCloud = async (email: string, password: string) => {
-    if (!auth) throw new Error('Serviço de autenticação inativo.');
-    await signInWithEmailAndPassword(auth, email, password);
+    if (!supabase) throw new Error('Serviço do Supabase inativo.');
+    const { error } = await supabase.auth.signInWithPassword({ email, password });
+    if (error) throw error;
   };
 
   const registerCloud = async (email: string, password: string) => {
-    if (!auth) throw new Error('Serviço de autenticação inativo.');
-    await createUserWithEmailAndPassword(auth, email, password);
+    if (!supabase) throw new Error('Serviço do Supabase inativo.');
+    const { error } = await supabase.auth.signUp({ email, password });
+    if (error) throw error;
   };
 
   const logoutCloud = async () => {
-    if (!auth) throw new Error('Serviço de autenticação inativo.');
-    await signOut(auth);
+    if (!supabase) throw new Error('Serviço do Supabase inativo.');
+    const { error } = await supabase.auth.signOut();
+    if (error) throw error;
     setCloudUser(null);
   };
 
-  // Firebase Authentication State Listener
+  // Supabase Authentication State Listener
   useEffect(() => {
-    if (!isFirebaseConfigured || !auth) return;
+    if (!isSupabaseConfigured || !supabase) return;
 
-    const unsubscribe = onAuthStateChanged(auth, (user) => {
+    const client = supabase;
+
+    // 1. Get initial session/user
+    client.auth.getSession().then(({ data: { session } }) => {
+      const user = session?.user ?? null;
       setCloudUser(user);
       if (user) {
-        // Trigger auto-sync on login / page mount
-        syncLogsWithCloud(user).catch(err => console.error('Auto sync failed:', err));
-        
-        // Pull settings from firestore
-        getDoc(doc(db!, 'users', user.uid, 'settings', 'config'))
-          .then((settingsDoc) => {
-            if (settingsDoc.exists()) {
-              const cloudSettings = settingsDoc.data() as SleepSettings;
-              saveSettings(cloudSettings);
-            } else {
-              // Upload local settings to firestore if not exists in cloud
-              setDoc(doc(db!, 'users', user.uid, 'settings', 'config'), settingsRef.current)
-                .catch(e => console.error('Failed to upload settings to Firestore:', e));
-            }
-          })
-          .catch(err => console.error('Failed to get cloud settings:', err));
+        handleUserLoginSync(user);
       }
     });
 
-    return () => unsubscribe();
+    // 2. Listen to auth changes
+    const { data: { subscription } } = client.auth.onAuthStateChange((_event, session) => {
+      const user = session?.user ?? null;
+      setCloudUser(user);
+      if (user) {
+        handleUserLoginSync(user);
+      }
+    });
+
+    const handleUserLoginSync = async (user: User) => {
+      // Trigger auto-sync on login / page mount
+      syncLogsWithCloud(user).catch(err => console.error('Auto sync failed:', err));
+      
+      // Pull settings from Supabase
+      try {
+        const { data: settingsRow, error } = await client
+          .from('sleep_settings')
+          .select('*')
+          .eq('user_id', user.id)
+          .single();
+
+        if (error && error.code !== 'PGRST116') { // PGRST116 means no row returned
+          console.error('Failed to get cloud settings:', error);
+          return;
+        }
+        
+        if (settingsRow) {
+          saveSettings(mapRowToSettings(settingsRow));
+        } else {
+          // Upload local settings to Supabase if not exists in cloud
+          const row = mapSettingsToRow(settingsRef.current, user.id);
+          const { error: upsertError } = await client
+            .from('sleep_settings')
+            .upsert(row);
+          if (upsertError) {
+            console.error('Failed to upload settings to Supabase:', upsertError);
+          }
+        }
+      } catch (err) {
+        console.error('Failed to get cloud settings:', err);
+      }
+    };
+
+    return () => {
+      subscription.unsubscribe();
+    };
   }, []);
 
   const connectDirectory = async () => {
@@ -460,7 +540,7 @@ export const SleepProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     localStorage.setItem('sleep_routine_settings', JSON.stringify(newSettings));
   };
 
-  const addLog = (log: SleepLog) => {
+  const addLog = async (log: SleepLog) => {
     const logWithTime = { ...log, updatedAt: log.updatedAt || Date.now() };
     const existingIndex = logs.findIndex((l) => l.date === log.date);
     let updated;
@@ -472,56 +552,65 @@ export const SleepProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     }
     saveLogs(updated.sort((a, b) => b.date.localeCompare(a.date)));
 
-    if (cloudUser && db) {
-      setDoc(doc(db, 'users', cloudUser.uid, 'logs', log.date), logWithTime)
-        .catch((e) => console.error('Erro ao salvar no Firestore:', e));
+    if (cloudUser && supabase) {
+      const row = mapLogToRow(logWithTime, cloudUser.id);
+      const { error } = await supabase.from('sleep_logs').upsert(row);
+      if (error) console.error('Erro ao salvar no Supabase:', error);
     }
   };
 
-  const updateLog = (date: string, updatedLog: SleepLog) => {
+  const updateLog = async (date: string, updatedLog: SleepLog) => {
     const logWithTime = { ...updatedLog, updatedAt: Date.now() };
     saveLogs(logs.map((l) => (l.date === date ? logWithTime : l)));
 
-    if (cloudUser && db) {
-      setDoc(doc(db, 'users', cloudUser.uid, 'logs', date), logWithTime)
-        .catch((e) => console.error('Erro ao atualizar no Firestore:', e));
+    if (cloudUser && supabase) {
+      const row = mapLogToRow(logWithTime, cloudUser.id);
+      const { error } = await supabase.from('sleep_logs').upsert(row);
+      if (error) console.error('Erro ao atualizar no Supabase:', error);
     }
   };
 
-  const deleteLog = (date: string) => {
+  const deleteLog = async (date: string) => {
     saveLogs(logs.filter((l) => l.date !== date));
 
-    if (cloudUser && db) {
-      deleteDoc(doc(db, 'users', cloudUser.uid, 'logs', date))
-        .catch((e) => console.error('Erro ao excluir no Firestore:', e));
+    if (cloudUser && supabase) {
+      const { error } = await supabase
+        .from('sleep_logs')
+        .delete()
+        .eq('user_id', cloudUser.id)
+        .eq('date', date);
+      if (error) console.error('Erro ao excluir no Supabase:', error);
     }
   };
 
-  const updateSettings = (newSettings: SleepSettings) => {
+  const updateSettings = async (newSettings: SleepSettings) => {
     saveSettings(newSettings);
 
-    if (cloudUser && db) {
-      setDoc(doc(db, 'users', cloudUser.uid, 'settings', 'config'), newSettings)
-        .catch((e) => console.error('Erro ao salvar configurações no Firestore:', e));
+    if (cloudUser && supabase) {
+      const row = mapSettingsToRow(newSettings, cloudUser.id);
+      const { error } = await supabase.from('sleep_settings').upsert(row);
+      if (error) console.error('Erro ao salvar configurações no Supabase:', error);
     }
   };
 
-  const importLogs = (newLogs: SleepLog[]) => {
+  const importLogs = async (newLogs: SleepLog[]) => {
     const logMap = new Map<string, SleepLog>();
     logs.forEach((l) => logMap.set(l.date, l));
     
-    newLogs.forEach((l) => {
+    const stampedLogs = newLogs.map((l) => {
       const stamped = { ...l, updatedAt: l.updatedAt || Date.now() };
       logMap.set(l.date, stamped);
-      
-      if (cloudUser && db) {
-        setDoc(doc(db, 'users', cloudUser.uid, 'logs', l.date), stamped)
-          .catch((e) => console.error('Erro ao sincronizar importação no Firestore:', e));
-      }
+      return stamped;
     });
 
     const merged = Array.from(logMap.values()).sort((a, b) => b.date.localeCompare(a.date));
     saveLogs(merged);
+
+    if (cloudUser && supabase) {
+      const rows = stampedLogs.map(l => mapLogToRow(l, cloudUser.id));
+      const { error } = await supabase.from('sleep_logs').upsert(rows);
+      if (error) console.error('Erro ao sincronizar importação no Supabase:', error);
+    }
   };
 
   const clearAllData = () => {
@@ -830,7 +919,7 @@ export const SleepProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         connectDirectory,
         disconnectDirectory,
         syncLocalDirectory,
-        isCloudConfigured: isFirebaseConfigured,
+        isCloudConfigured: isSupabaseConfigured,
         cloudUser,
         cloudSyncing,
         syncLogsWithCloud,
