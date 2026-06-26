@@ -14,7 +14,14 @@ export const Settings: React.FC = () => {
     syncDirName,
     connectDirectory,
     disconnectDirectory,
-    syncLocalDirectory
+    syncLocalDirectory,
+    isCloudConfigured,
+    cloudUser,
+    cloudSyncing,
+    syncLogsWithCloud,
+    loginCloud,
+    registerCloud,
+    logoutCloud
   } = useSleep();
   
   const [targetBedtimeStart, setTargetBedtimeStart] = useState(settings.targetBedtimeStart);
@@ -30,6 +37,67 @@ export const Settings: React.FC = () => {
 
   const [syncStatus, setSyncStatus] = useState<{ success?: boolean; message?: string }>({});
   const [syncing, setSyncing] = useState(false);
+
+  // Cloud Sync States
+  const [authEmail, setAuthEmail] = useState('');
+  const [authPassword, setAuthPassword] = useState('');
+  const [authError, setAuthError] = useState('');
+  const [authSuccess, setAuthSuccess] = useState('');
+  const [authLoading, setAuthLoading] = useState(false);
+  const [cloudMessage, setCloudMessage] = useState('');
+
+  const handleCloudLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!authEmail || !authPassword) return;
+    setAuthLoading(true);
+    setAuthError('');
+    setAuthSuccess('');
+    try {
+      await loginCloud(authEmail, authPassword);
+      setAuthSuccess('Autenticado com sucesso!');
+      setAuthEmail('');
+      setAuthPassword('');
+    } catch (err: any) {
+      setAuthError(err.message || 'Falha ao autenticar. Verifique email/senha.');
+    } finally {
+      setAuthLoading(false);
+    }
+  };
+
+  const handleCloudRegister = async () => {
+    if (!authEmail || !authPassword) {
+      setAuthError('Preencha os campos de email e senha.');
+      return;
+    }
+    if (authPassword.length < 6) {
+      setAuthError('A senha deve ter no mínimo 6 caracteres.');
+      return;
+    }
+    setAuthLoading(true);
+    setAuthError('');
+    setAuthSuccess('');
+    try {
+      await registerCloud(authEmail, authPassword);
+      setAuthSuccess('Conta criada e autenticada com sucesso!');
+      setAuthEmail('');
+      setAuthPassword('');
+    } catch (err: any) {
+      setAuthError(err.message || 'Falha ao criar conta. Email pode já estar em uso.');
+    } finally {
+      setAuthLoading(false);
+    }
+  };
+
+  const handleCloudSync = async () => {
+    setCloudMessage('Sincronizando...');
+    try {
+      const result = await syncLogsWithCloud();
+      setCloudMessage(result);
+      setTimeout(() => setCloudMessage(''), 5000);
+    } catch (err: any) {
+      setCloudMessage(`Erro: ${err.message}`);
+    }
+  };
 
   const handleLocalSync = async () => {
     setSyncing(true);
@@ -539,6 +607,126 @@ ${formatDate(1)},00:05,08:30,4`;
 
         {/* Right Column: Folder Sync & Watch/Fit Imports */}
         <div className="space-y-6">
+
+          {/* Cloud Sync Panel (Firebase) */}
+          <div className="p-5 rounded-2xl border border-white/5 bg-slate-900/30 space-y-4">
+            <h3 className="text-xs font-semibold text-slate-400 flex items-center gap-1.5 uppercase tracking-wider">
+              <Upload className="w-4 h-4 text-violet-400" /> Sincronização em Nuvem (Firebase)
+            </h3>
+
+            {!isCloudConfigured ? (
+              <div className="space-y-3">
+                <p className="text-[11px] text-slate-500 leading-normal">
+                  O recurso de backup automático na nuvem está **desativado** porque nenhuma credencial do Firebase foi configurada.
+                </p>
+                <div className="text-[10px] p-3 rounded-xl border border-amber-500/10 bg-amber-500/[0.02] text-amber-400/90 space-y-2">
+                  <span className="font-bold flex items-center gap-1"><AlertCircle className="w-3.5 h-3.5" /> Como ativar:</span>
+                  <ol className="list-decimal list-inside space-y-1">
+                    <li>Crie um projeto gratuito no site do Firebase.</li>
+                    <li>Ative o **Authentication** (Email/Senha) e o **Firestore Database**.</li>
+                    <li>Crie um arquivo <code className="text-slate-300">.env.local</code> na raiz do projeto baseado no <code className="text-slate-300">.env.example</code>.</li>
+                    <li>Adicione as variáveis de ambiente equivalentes na Vercel para a versão online.</li>
+                  </ol>
+                </div>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {cloudUser ? (
+                  // Logged In State
+                  <div className="space-y-3">
+                    <div className="flex items-center justify-between text-xs bg-slate-950/40 px-3 py-2.5 rounded-xl border border-emerald-500/10">
+                      <div className="flex flex-col pr-2 truncate">
+                        <span className="text-[9px] text-slate-500 font-bold uppercase tracking-wider">Sincronizado como</span>
+                        <span className="text-slate-300 font-semibold truncate text-[11px]">{cloudUser.email}</span>
+                      </div>
+                      <span className="text-emerald-400 font-bold uppercase tracking-wider text-[8px] px-1.5 py-0.5 rounded bg-emerald-500/10 border border-emerald-500/10 shrink-0">
+                        Ativo
+                      </span>
+                    </div>
+
+                    {cloudMessage && (
+                      <div className="text-[10px] px-3 py-2 rounded-lg bg-violet-500/10 text-violet-400 border border-violet-500/10 leading-normal">
+                        {cloudMessage}
+                      </div>
+                    )}
+
+                    <div className="flex gap-2">
+                      <button
+                        type="button"
+                        onClick={logoutCloud}
+                        className="flex-1 h-9 rounded-xl border border-rose-500/15 bg-rose-500/5 hover:bg-rose-500/10 text-[11px] font-semibold text-rose-400 transition-all"
+                      >
+                        Desconectar
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleCloudSync}
+                        disabled={cloudSyncing}
+                        className="flex-1 h-9 rounded-xl bg-violet-600 hover:bg-violet-500 active:scale-98 text-[11px] font-semibold text-white transition-all disabled:opacity-50 flex items-center justify-center gap-1"
+                      >
+                        {cloudSyncing ? 'Sincronizando...' : 'Sincronizar Agora'}
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  // Logged Out State / Login Form
+                  <form onSubmit={handleCloudLogin} className="space-y-3">
+                    <p className="text-[11px] text-slate-500 leading-normal">
+                      Conecte-se para manter seu histórico de sono sincronizado em tempo real entre todos os seus dispositivos.
+                    </p>
+
+                    <div className="space-y-2">
+                      <input
+                        type="email"
+                        placeholder="Email"
+                        value={authEmail}
+                        onChange={(e) => setAuthEmail(e.target.value)}
+                        className="w-full h-9 px-3 rounded-xl border border-white/5 bg-slate-950/60 text-xs text-slate-100 placeholder-slate-700 focus:outline-none focus:border-violet-500"
+                        required
+                      />
+                      <input
+                        type="password"
+                        placeholder="Senha (mínimo 6 chars)"
+                        value={authPassword}
+                        onChange={(e) => setAuthPassword(e.target.value)}
+                        className="w-full h-9 px-3 rounded-xl border border-white/5 bg-slate-950/60 text-xs text-slate-100 placeholder-slate-700 focus:outline-none focus:border-violet-500"
+                        required
+                      />
+                    </div>
+
+                    {authError && (
+                      <div className="text-[10px] px-3 py-1.5 rounded-lg bg-rose-500/10 text-rose-400 border border-rose-500/10">
+                        {authError}
+                      </div>
+                    )}
+                    {authSuccess && (
+                      <div className="text-[10px] px-3 py-1.5 rounded-lg bg-emerald-500/10 text-emerald-400 border border-emerald-500/10">
+                        {authSuccess}
+                      </div>
+                    )}
+
+                    <div className="flex gap-2 pt-1">
+                      <button
+                        type="button"
+                        onClick={handleCloudRegister}
+                        disabled={authLoading}
+                        className="flex-1 h-9 rounded-xl border border-white/5 bg-slate-900/50 hover:bg-slate-800 text-[11px] font-semibold text-slate-400 transition-colors disabled:opacity-50"
+                      >
+                        Criar Conta
+                      </button>
+                      <button
+                        type="submit"
+                        disabled={authLoading}
+                        className="flex-1 h-9 rounded-xl bg-violet-600 hover:bg-violet-500 active:scale-98 text-[11px] font-semibold text-white transition-all disabled:opacity-50"
+                      >
+                        {authLoading ? 'Entrando...' : 'Entrar'}
+                      </button>
+                    </div>
+                  </form>
+                )}
+              </div>
+            )}
+          </div>
 
           {/* Local Folder Sync (Google Drive / Takeout) */}
           <div className="p-5 rounded-2xl border border-white/5 bg-slate-900/30 space-y-4">

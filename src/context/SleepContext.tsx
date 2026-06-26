@@ -1,4 +1,20 @@
-import React, { createContext, useContext, useState, useEffect } from 'react';
+import React, { createContext, useContext, useState, useEffect, useRef } from 'react';
+import { 
+  signInWithEmailAndPassword, 
+  createUserWithEmailAndPassword, 
+  signOut, 
+  onAuthStateChanged,
+  type User
+} from 'firebase/auth';
+import { 
+  doc, 
+  setDoc, 
+  getDoc, 
+  deleteDoc, 
+  getDocs, 
+  collection
+} from 'firebase/firestore';
+import { auth, db, isFirebaseConfigured } from '../firebase';
 
 export interface Awakening {
   id: string;
@@ -16,6 +32,7 @@ export interface SleepLog {
   notes: string;
   tags: string[]; // ["Caffeine late", "Late workout", "Late screen", "Stress", "Alcohol", "Heavy meal"]
   source: 'manual' | 'zepp' | 'fit';
+  updatedAt?: number; // timestamp in milliseconds for conflict resolution
 }
 
 export interface SleepSettings {
@@ -45,6 +62,15 @@ interface SleepContextType {
   connectDirectory: () => Promise<void>;
   disconnectDirectory: () => Promise<void>;
   syncLocalDirectory: () => Promise<string>;
+
+  // Cloud Sync Extensions
+  isCloudConfigured: boolean;
+  cloudUser: User | null;
+  cloudSyncing: boolean;
+  syncLogsWithCloud: (currentUser?: User | null) => Promise<string>;
+  loginCloud: (email: string, password: string) => Promise<void>;
+  registerCloud: (email: string, password: string) => Promise<void>;
+  logoutCloud: () => Promise<void>;
 }
 
 interface SleepAnalytics {
@@ -104,6 +130,21 @@ export const SleepProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   const [syncDirName, setSyncDirName] = useState<string | null>(null);
   const [dirHandle, setDirHandle] = useState<any | null>(null);
 
+  // Cloud Sync State
+  const [cloudUser, setCloudUser] = useState<User | null>(null);
+  const [cloudSyncing, setCloudSyncing] = useState<boolean>(false);
+  const logsRef = useRef<SleepLog[]>([]);
+  const settingsRef = useRef<SleepSettings>(settings);
+
+  // Keep refs in sync to avoid stale closures in auth state listener
+  useEffect(() => {
+    logsRef.current = logs;
+  }, [logs]);
+
+  useEffect(() => {
+    settingsRef.current = settings;
+  }, [settings]);
+
   // Load from localStorage & IndexedDB on mount
   useEffect(() => {
     const storedLogs = localStorage.getItem('sleep_routine_logs');
@@ -111,14 +152,18 @@ export const SleepProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
     if (storedLogs) {
       try {
-        setLogs(JSON.parse(storedLogs));
+        const parsed = JSON.parse(storedLogs);
+        setLogs(parsed);
+        logsRef.current = parsed;
       } catch (e) {
         console.error('Failed to parse logs from localStorage', e);
       }
     }
     if (storedSettings) {
       try {
-        setSettings(JSON.parse(storedSettings));
+        const parsed = JSON.parse(storedSettings);
+        setSettings(parsed);
+        settingsRef.current = parsed;
       } catch (e) {
         console.error('Failed to parse settings from localStorage', e);
       }
@@ -130,6 +175,125 @@ export const SleepProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         setSyncDirName(handle.name);
       }
     }).catch(err => console.error('Failed to get directory handle', err));
+  }, []);
+
+  // Cloud Sync Functions
+  const syncLogsWithCloud = async (currentUser?: User | null): Promise<string> => {
+    const activeUser = currentUser === undefined ? cloudUser : currentUser;
+    if (!activeUser || !db) {
+      throw new Error('Usuário não autenticado no Firebase.');
+    }
+
+    setCloudSyncing(true);
+    try {
+      // 1. Fetch all logs from Firestore for this user
+      const querySnapshot = await getDocs(collection(db, 'users', activeUser.uid, 'logs'));
+      const cloudLogsMap = new Map<string, SleepLog>();
+      
+      querySnapshot.forEach((doc) => {
+        cloudLogsMap.set(doc.id, doc.data() as SleepLog);
+      });
+
+      // 2. Merge local and cloud logs
+      const localLogsMap = new Map<string, SleepLog>();
+      logsRef.current.forEach((log) => localLogsMap.set(log.date, log));
+
+      const mergedLogsList: SleepLog[] = [];
+      const logsToUpload: SleepLog[] = [];
+
+      // Combine keys from both maps
+      const allDates = new Set([...localLogsMap.keys(), ...cloudLogsMap.keys()]);
+
+      for (const date of allDates) {
+        const localLog = localLogsMap.get(date);
+        const cloudLog = cloudLogsMap.get(date);
+
+        if (localLog && cloudLog) {
+          // Both exist: resolve by updatedAt timestamp
+          const localTime = localLog.updatedAt || 0;
+          const cloudTime = cloudLog.updatedAt || 0;
+
+          if (localTime >= cloudTime) {
+            mergedLogsList.push(localLog);
+            if (localTime > cloudTime) {
+              logsToUpload.push(localLog);
+            }
+          } else {
+            mergedLogsList.push(cloudLog);
+          }
+        } else if (localLog) {
+          // Only local exists: upload to cloud
+          mergedLogsList.push(localLog);
+          logsToUpload.push(localLog);
+        } else if (cloudLog) {
+          // Only cloud exists: pull to local
+          mergedLogsList.push(cloudLog);
+        }
+      }
+
+      // 3. Upload missing/updated logs to Firestore
+      if (logsToUpload.length > 0) {
+        for (const log of logsToUpload) {
+          await setDoc(doc(db, 'users', activeUser.uid, 'logs', log.date), log);
+        }
+      }
+
+      // 4. Save merged list locally
+      const sortedMerged = mergedLogsList.sort((a, b) => b.date.localeCompare(a.date));
+      saveLogs(sortedMerged);
+
+      return `Sincronização concluída. ${logsToUpload.length} registros enviados para a nuvem. ${mergedLogsList.length - logsRef.current.length} novos registros baixados.`;
+    } catch (e: any) {
+      console.error(e);
+      throw new Error(`Erro na sincronização: ${e.message || e}`);
+    } finally {
+      setCloudSyncing(false);
+    }
+  };
+
+  const loginCloud = async (email: string, password: string) => {
+    if (!auth) throw new Error('Serviço de autenticação inativo.');
+    await signInWithEmailAndPassword(auth, email, password);
+  };
+
+  const registerCloud = async (email: string, password: string) => {
+    if (!auth) throw new Error('Serviço de autenticação inativo.');
+    await createUserWithEmailAndPassword(auth, email, password);
+  };
+
+  const logoutCloud = async () => {
+    if (!auth) throw new Error('Serviço de autenticação inativo.');
+    await signOut(auth);
+    setCloudUser(null);
+  };
+
+  // Firebase Authentication State Listener
+  useEffect(() => {
+    if (!isFirebaseConfigured || !auth) return;
+
+    const unsubscribe = onAuthStateChanged(auth, (user) => {
+      setCloudUser(user);
+      if (user) {
+        // Trigger auto-sync on login / page mount
+        syncLogsWithCloud(user).catch(err => console.error('Auto sync failed:', err));
+        
+        // Pull settings from firestore
+        getDoc(doc(db!, 'users', user.uid, 'settings', 'config'))
+          .then((settingsDoc) => {
+            if (settingsDoc.exists()) {
+              const cloudSettings = settingsDoc.data() as SleepSettings;
+              saveSettings(cloudSettings);
+            } else {
+              // Upload local settings to firestore if not exists in cloud
+              setDoc(doc(db!, 'users', user.uid, 'settings', 'config'), settingsRef.current)
+                .catch(e => console.error('Failed to upload settings to Firestore:', e));
+            }
+          })
+          .catch(err => console.error('Failed to get cloud settings:', err));
+      }
+    });
+
+    return () => unsubscribe();
   }, []);
 
   const connectDirectory = async () => {
@@ -297,33 +461,65 @@ export const SleepProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   };
 
   const addLog = (log: SleepLog) => {
+    const logWithTime = { ...log, updatedAt: log.updatedAt || Date.now() };
     const existingIndex = logs.findIndex((l) => l.date === log.date);
+    let updated;
     if (existingIndex > -1) {
-      const updated = [...logs];
-      updated[existingIndex] = log;
-      saveLogs(updated.sort((a, b) => b.date.localeCompare(a.date)));
+      updated = [...logs];
+      updated[existingIndex] = logWithTime;
     } else {
-      saveLogs([...logs, log].sort((a, b) => b.date.localeCompare(a.date)));
+      updated = [...logs, logWithTime];
+    }
+    saveLogs(updated.sort((a, b) => b.date.localeCompare(a.date)));
+
+    if (cloudUser && db) {
+      setDoc(doc(db, 'users', cloudUser.uid, 'logs', log.date), logWithTime)
+        .catch((e) => console.error('Erro ao salvar no Firestore:', e));
     }
   };
 
   const updateLog = (date: string, updatedLog: SleepLog) => {
-    saveLogs(logs.map((l) => (l.date === date ? updatedLog : l)));
+    const logWithTime = { ...updatedLog, updatedAt: Date.now() };
+    saveLogs(logs.map((l) => (l.date === date ? logWithTime : l)));
+
+    if (cloudUser && db) {
+      setDoc(doc(db, 'users', cloudUser.uid, 'logs', date), logWithTime)
+        .catch((e) => console.error('Erro ao atualizar no Firestore:', e));
+    }
   };
 
   const deleteLog = (date: string) => {
     saveLogs(logs.filter((l) => l.date !== date));
+
+    if (cloudUser && db) {
+      deleteDoc(doc(db, 'users', cloudUser.uid, 'logs', date))
+        .catch((e) => console.error('Erro ao excluir no Firestore:', e));
+    }
   };
 
   const updateSettings = (newSettings: SleepSettings) => {
     saveSettings(newSettings);
+
+    if (cloudUser && db) {
+      setDoc(doc(db, 'users', cloudUser.uid, 'settings', 'config'), newSettings)
+        .catch((e) => console.error('Erro ao salvar configurações no Firestore:', e));
+    }
   };
 
   const importLogs = (newLogs: SleepLog[]) => {
-    // Merge new logs, keeping duplicates from imported if newer
     const logMap = new Map<string, SleepLog>();
     logs.forEach((l) => logMap.set(l.date, l));
-    newLogs.forEach((l) => logMap.set(l.date, l));
+    
+    newLogs.forEach((l) => {
+      const stamped = { ...l, updatedAt: l.updatedAt || Date.now() };
+      logMap.set(l.date, stamped);
+      
+      if (cloudUser && db) {
+        setDoc(doc(db, 'users', cloudUser.uid, 'logs', l.date), stamped)
+          .catch((e) => console.error('Erro ao sincronizar importação no Firestore:', e));
+      }
+    });
+
     const merged = Array.from(logMap.values()).sort((a, b) => b.date.localeCompare(a.date));
     saveLogs(merged);
   };
@@ -634,6 +830,13 @@ export const SleepProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         connectDirectory,
         disconnectDirectory,
         syncLocalDirectory,
+        isCloudConfigured: isFirebaseConfigured,
+        cloudUser,
+        cloudSyncing,
+        syncLogsWithCloud,
+        loginCloud,
+        registerCloud,
+        logoutCloud,
       }}
     >
       {children}
