@@ -54,7 +54,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ onLogClick }) => {
     return 'stroke-rose-500';
   };
 
-  const strokeDashoffset = 282.7 - (282.7 * analytics.stabilityScore) / 100;
+  const strokeDashoffset = 414.7 - (414.7 * analytics.stabilityScore) / 100;
 
   return (
     <div className="space-y-6 pb-24 text-slate-200">
@@ -86,33 +86,33 @@ export const Dashboard: React.FC<DashboardProps> = ({ onLogClick }) => {
             
             <div className="flex flex-col items-center text-center space-y-4">
               {/* Radial progress ring */}
-              <div className="relative w-32 h-32 flex items-center justify-center shrink-0">
-                <svg className="w-full h-full transform -rotate-90">
+              <div className="relative w-44 h-44 flex items-center justify-center shrink-0">
+                <svg className="w-full h-full transform -rotate-90" viewBox="0 0 176 176">
                   <circle
-                    cx="64"
-                    cy="64"
-                    r="45"
+                    cx="88"
+                    cy="88"
+                    r="66"
                     className="stroke-slate-800"
-                    strokeWidth="10"
+                    strokeWidth="12"
                     fill="transparent"
                   />
                   <circle
-                    cx="64"
-                    cy="64"
-                    r="45"
+                    cx="88"
+                    cy="88"
+                    r="66"
                     className={`${getScoreColor(analytics.stabilityScore)} transition-all duration-1000 ease-out`}
-                    strokeWidth="10"
-                    strokeDasharray="282.7"
+                    strokeWidth="12"
+                    strokeDasharray="414.7"
                     strokeDashoffset={strokeDashoffset}
                     strokeLinecap="round"
                     fill="transparent"
                   />
                 </svg>
-                <div className="absolute text-center">
-                  <span className="text-3xl font-extrabold tracking-tight text-white">
+                <div className="absolute text-center flex flex-col items-center justify-center">
+                  <span className="text-4xl font-extrabold tracking-tight text-white leading-none">
                     {analytics.stabilityScore}
                   </span>
-                  <span className="block text-[10px] font-medium text-slate-400 uppercase tracking-widest">
+                  <span className="block text-[9px] font-bold text-slate-500 uppercase tracking-widest mt-1.5">
                     Estabilidade
                   </span>
                 </div>
